@@ -8,7 +8,7 @@
  */
 
 import './table.scss';
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import useWindowSize from 'react-use/lib/useWindowSize';
 import useLocalStorage from 'react-use/lib/useLocalStorage';
 import {
@@ -135,7 +135,7 @@ export const DocViewerTable = ({
   const { euiTheme } = useEuiTheme();
   const isEsqlMode = Array.isArray(textBasedHits);
   const [containerRef, setContainerRef] = useState<HTMLDivElement | null>(null);
-  const [dataGridRef, setDataGridRef] = useState<EuiDataGridRefProps | null>(null);
+  const dataGridRef = useRef<EuiDataGridRefProps | null>(null);
   const { fieldFormats, storage, uiSettings, toasts } = getUnifiedDocViewerServices();
   const showMultiFields = uiSettings.get(SHOW_MULTIFIELDS);
   const currentDataViewId = dataView.id!;
@@ -305,7 +305,7 @@ export const DocViewerTable = ({
         pinnedRows,
         restRows,
       });
-      dataGridRef.setFocusedCell({ rowIndex: position, colIndex: 0 });
+      dataGridRef.current?.setFocusedCell({ rowIndex: position, colIndex: 0 });
     },
     [pinnedRows, restRows, dataGridRef]
   );
@@ -555,7 +555,7 @@ export const DocViewerTable = ({
               defaultMessage: 'Field values',
             })}
             className="kbnDocViewer__fieldsGrid"
-            ref={setDataGridRef}
+            ref={dataGridRef}
             columns={gridColumns}
             toolbarVisibility={false}
             rowCount={rows.length}
