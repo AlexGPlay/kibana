@@ -115,6 +115,23 @@ test(`retrieves title from the data view name if the params only contain a data 
   expect(title).toBe('logs-*');
 });
 
+test(`retrieves title from the name of an ad hoc data view`, async () => {
+  const provider = titleFromLocatorFactory(mockServices);
+  const title = await provider({
+    dataViewSpec: { id: 'ad-hoc', title: 'logs-*', name: 'My logs' },
+  });
+
+  expect(dataViewsService.get).not.toHaveBeenCalled();
+  expect(title).toBe('My logs');
+});
+
+test(`retrieves title from the index pattern of an ad hoc data view without a name`, async () => {
+  const provider = titleFromLocatorFactory(mockServices);
+  const title = await provider({ dataViewSpec: { id: 'ad-hoc', title: 'logs-*' } });
+
+  expect(title).toBe('logs-*');
+});
+
 test(`prefers the saved search title if the params contain a saved search ID and a data view ID`, async () => {
   const provider = titleFromLocatorFactory(mockServices);
   const title = await provider({ savedSearchId: mockSavedSearchId, dataViewId: 'test-id' });

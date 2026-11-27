@@ -43,13 +43,13 @@ function normalizeFilter(savedSearchFilterTmp?: FilterResponse) {
 
 /*
  * Whether the filters of the locator params replace the filters that have been saved into the saved search.
- * Discover sends the full current state of the search, which includes an explicit data view (`dataViewId`) and
- * the saved filters that were not removed, so its filters replace the saved ones. The params that only have a
- * saved search and some filters (for example, of an API script) add them to the saved ones.
- * TODO: also consider `dataViewSpec`, when the ad hoc data views are supported.
+ * Discover sends the full current state of the search, which includes an explicit data view (`dataViewId`, or
+ * `dataViewSpec` for an ad hoc data view) and the saved filters that were not removed, so its filters replace the
+ * saved ones. The params that only have a saved search and some filters (for example, of an API script) add them
+ * to the saved ones.
  */
 const replacesSavedFilters = (params: DiscoverAppLocatorParams): boolean =>
-  params.filters !== undefined && Boolean(params.dataViewId);
+  params.filters !== undefined && Boolean(params.dataViewId || params.dataViewSpec);
 
 /*
  * Combine the time range filter with the filters of the search: the filters in the locator params and the ones
