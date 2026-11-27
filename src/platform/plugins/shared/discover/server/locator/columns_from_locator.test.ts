@@ -12,7 +12,7 @@ import { coreMock, httpServerMock } from '@kbn/core/server/mocks';
 import type { ISearchStartSearchSource, SearchSource } from '@kbn/data-plugin/common';
 import { createSearchSourceMock } from '@kbn/data-plugin/common/search/search_source/mocks';
 import { dataPluginMock } from '@kbn/data-plugin/server/mocks';
-import type { DataView, DataViewsService } from '@kbn/data-views-plugin/common';
+import type { DataView, DataViewSpec, DataViewsService } from '@kbn/data-views-plugin/common';
 import { createStubDataView } from '@kbn/data-views-plugin/common/stubs';
 import type { SavedSearchAttributes } from '@kbn/saved-search-plugin/common';
 import type { DiscoverSessionTabAttributes } from '@kbn/saved-search-plugin/server';
@@ -62,7 +62,7 @@ let searchSourceStart: ISearchStartSearchSource;
 let mockServices: Services;
 let mockSavedSearch: SavedObject<SavedSearchAttributes>;
 let mockDataView: DataView;
-let dataViewsService: jest.Mocked<Pick<DataViewsService, 'get'>>;
+let dataViewsService: jest.Mocked<Pick<DataViewsService, 'get' | 'create'>>;
 
 // mock search source belonging to the saved search
 let mockSearchSource: SearchSource;
@@ -77,7 +77,7 @@ beforeAll(async () => {
   uiSettingsClient = coreMock.createStart().uiSettings.asScopedToClient(soClient);
   searchSourceStart = await dataStartMock.search.searchSource.asScoped(request);
 
-  dataViewsService = { get: jest.fn() };
+  dataViewsService = { get: jest.fn(), create: jest.fn() };
 
   mockServices = {
     searchSourceStart,
@@ -108,15 +108,23 @@ beforeEach(() => {
   mockSearchSource = createSearchSourceMock();
   mockSearchSource.setField('index', mockDataView);
   dataViewsService.get.mockReset();
+  dataViewsService.create.mockReset();
 
-  // like the real one, the index is loaded from its id (the data views that are not mocked are ignored)
-  searchSourceStart.create = jest.fn().mockImplementation(async (fields?: { index?: string }) => {
-    const dataView = fields?.index ? await dataViewsService.get(fields.index) : undefined;
-    if (dataView) {
-      mockSearchSource.setField('index', dataView);
-    }
-    return mockSearchSource;
-  });
+  // like the real one, the index is loaded from its id, or created from its spec (the data views that are not
+  // mocked are ignored)
+  searchSourceStart.create = jest
+    .fn()
+    .mockImplementation(async (fields?: { index?: string | DataViewSpec }) => {
+      const index = fields?.index;
+      const dataView =
+        typeof index === 'string'
+          ? await dataViewsService.get(index)
+          : index && (await dataViewsService.create(index));
+      if (dataView) {
+        mockSearchSource.setField('index', dataView);
+      }
+      return mockSearchSource;
+    });
 
   const uiSettingsGet = uiSettingsClient.get;
   uiSettingsClient.get = jest.fn().mockImplementation((key: string) => {
@@ -237,9 +245,18 @@ test('throws without a saved search or data view reference', async () => {
   );
 });
 
-test('throws when only an ad hoc data view spec is provided', async () => {
-  const provider = columnsFromLocatorFactory(mockServices);
-  await expect(provider({ dataViewSpec: { title: 'logs-*' } })).rejects.toThrow(
-    'DiscoverAppLocatorParams must contain a saved search reference'
+test('uses the time field of an ad hoc data view', async () => {
+  dataViewsService.create.mockResolvedValue(
+    createStubDataView({
+      spec: { id: 'ad-hoc-data-view', name: 'logs', timeFieldName: '@timestamp' },
+    })
   );
+
+  const provider = columnsFromLocatorFactory(mockServices);
+  const columns = await provider({
+    dataViewSpec: { id: 'ad-hoc-data-view', title: 'logs-*', timeFieldName: '@timestamp' },
+    columns: ['message'],
+  });
+
+  expect(columns).toEqual(['@timestamp', 'message']);
 });

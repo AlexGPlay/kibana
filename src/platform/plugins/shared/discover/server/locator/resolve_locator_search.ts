@@ -10,11 +10,12 @@
 import Boom from '@hapi/boom';
 import dateMath from '@kbn/datemath';
 import type { ISearchSource, ISearchStartSearchSource } from '@kbn/data-plugin/common';
-import type { DataView } from '@kbn/data-views-plugin/common';
+import type { DataView, DataViewSpec } from '@kbn/data-views-plugin/common';
 import type { SavedSearch } from '@kbn/saved-search-plugin/common';
 import { getSavedSearch } from '@kbn/saved-search-plugin/server';
 import type { LocatorServicesDeps } from '.';
 import type { DiscoverAppLocatorParams } from '../../common';
+import { validateDataViewSpec } from './validate_data_view_spec';
 
 export interface ResolvedLocatorSearch {
   /** The saved search referenced by the params, if any. */
@@ -50,19 +51,26 @@ const isSortOrderPair = (item: unknown): boolean =>
 const validateParams = ({
   savedSearchId,
   dataViewId,
+  dataViewSpec,
   columns,
   sort,
   timeRange,
   filters,
 }: DiscoverAppLocatorParams): void => {
   // The ids must be strings: `dataViewId` is used as the `index` of a search source, which takes an object as
-  // the spec of an ad hoc data view, and that is not supported here.
+  // the spec of an ad hoc data view. That is only allowed with `dataViewSpec`, which is validated.
   if (savedSearchId !== undefined && !isNonEmptyString(savedSearchId)) {
     throw new Error('Invalid DiscoverAppLocatorParams: "savedSearchId" must be a non-empty string');
   }
 
   if (dataViewId !== undefined && !isNonEmptyString(dataViewId)) {
     throw new Error('Invalid DiscoverAppLocatorParams: "dataViewId" must be a non-empty string');
+  }
+
+  if (dataViewId !== undefined && dataViewSpec !== undefined) {
+    throw new Error(
+      'Invalid DiscoverAppLocatorParams: "dataViewId" and "dataViewSpec" can not be used together'
+    );
   }
 
   if (columns !== undefined && !(Array.isArray(columns) && columns.every(isString))) {
@@ -93,16 +101,16 @@ const validateParams = ({
 };
 
 /**
- * Creates the search sources with the requested data view, instead of the one that is referenced by the
- * saved search. The latter would be loaded first, so a saved search whose data view was deleted could not be
- * exported with another data view.
+ * Creates the search sources with the requested data view (an id, or the spec of an ad hoc data view), instead
+ * of the one that is referenced by the saved search. The latter would be loaded first, so a saved search whose
+ * data view was deleted could not be exported with another data view.
  */
 const withDataView = (
   searchSourceStart: ISearchStartSearchSource,
-  dataViewId: string
+  index: string | Omit<DataViewSpec, 'fields'>
 ): ISearchStartSearchSource => ({
   ...searchSourceStart,
-  create: (fields) => searchSourceStart.create({ ...fields, index: dataViewId }),
+  create: (fields) => searchSourceStart.create({ ...fields, index }),
 });
 
 /**
@@ -114,26 +122,30 @@ const withDataView = (
  *   view of a saved session was changed in the UI. Columns that don't exist in it are still requested
  *   (`include_unmapped`).
  *
- * Ad hoc data views (`dataViewSpec` only) are not supported on the server.
+ * - `dataViewSpec`: an ad hoc data view, which is created in memory from its spec. It is used like `dataViewId`,
+ *   but they can not be used together.
+ *
  * @internal
  */
 export const resolveLocatorSearch = async (
   services: LocatorServicesDeps,
   params: DiscoverAppLocatorParams
 ): Promise<ResolvedLocatorSearch> => {
-  const { savedSearchId, dataViewId } = params;
+  const { savedSearchId, dataViewId, dataViewSpec } = params;
 
   validateParams(params);
+  const adHocDataView = dataViewSpec !== undefined ? validateDataViewSpec(dataViewSpec) : undefined;
 
-  if (!savedSearchId && !dataViewId) {
+  if (!savedSearchId && !dataViewId && !adHocDataView) {
     throw new Error(
-      'DiscoverAppLocatorParams must contain a saved search reference (savedSearchId) or a data view reference (dataViewId)'
+      'DiscoverAppLocatorParams must contain a saved search reference (savedSearchId) or a data view reference (dataViewId or dataViewSpec)'
     );
   }
 
   try {
-    const searchSourceStart = dataViewId
-      ? withDataView(services.searchSourceStart, dataViewId)
+    const requestedDataView = dataViewId ?? adHocDataView;
+    const searchSourceStart = requestedDataView
+      ? withDataView(services.searchSourceStart, requestedDataView)
       : services.searchSourceStart;
 
     const savedSearch = savedSearchId
@@ -160,6 +172,7 @@ export const resolveLocatorSearch = async (
     const context = [
       savedSearchId && `savedSearchId: ${savedSearchId}`,
       dataViewId && `dataViewId: ${dataViewId}`,
+      adHocDataView && `ad hoc data view: ${adHocDataView.title}`,
     ]
       .filter(Boolean)
       .join(', ');

@@ -18,18 +18,29 @@ import type { DiscoverAppLocatorParams } from '../../common';
 export const titleFromLocatorFactory = (services: LocatorServicesDeps) => {
   /**
    * Allows consumers to derive a title of a search in Disocver from DiscoverAppLocatorParams.
-   * Uses the title of the saved search, or the name of the data view when the params only
-   * contain a reference to a data view.
+   * Uses the title of the saved search, or the name of the data view (or of the ad hoc data view) when the
+   * params only contain a reference to a data view.
    *
    * @public
    */
   const titleFromLocator = async (
     params: DiscoverAppLocatorParams & { title?: string }
   ): Promise<string> => {
-    const { savedSearchId, dataViewId, title: paramsTitle } = params;
+    const { savedSearchId, dataViewId, dataViewSpec, title: paramsTitle } = params;
 
     if (paramsTitle) {
       return paramsTitle;
+    }
+
+    // The spec is not validated yet: it is validated when the search is resolved, by the report task
+    if (!savedSearchId && !dataViewId && dataViewSpec) {
+      const { name, title } = dataViewSpec;
+      const specTitle = [name, title].find(
+        (value) => typeof value === 'string' && value.length > 0
+      );
+      if (specTitle) {
+        return specTitle;
+      }
     }
 
     if (!savedSearchId && dataViewId) {

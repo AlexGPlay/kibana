@@ -27,6 +27,7 @@ const TIMELESS_SAVED_SEARCH_WITH_QUERY = 'fc3e8ff0-9844-11ed-8e25-6b737289a7c8';
 export default ({ getService }: FtrProviderContext) => {
   const es = getService('es');
   const supertest = getService('supertest');
+  const supertestWithoutAuth = getService('supertestWithoutAuth');
   const kibanaServer = getService('kibanaServer');
   const esArchiver = getService('esArchiver');
   const reportingAPI = getService('reportingAPI');
@@ -376,6 +377,104 @@ export default ({ getService }: FtrProviderContext) => {
             });
 
             expect(getRows(csvFile)).to.eql([]);
+          });
+        });
+
+        describe('ad hoc data view (data view spec)', () => {
+          const ecommerceSpec = {
+            id: 'ad-hoc-ecommerce',
+            title: 'ecommerce',
+            timeFieldName: 'order_date',
+          };
+          const getRows = (csvFile: string) => csvFile.trim().split('\n').slice(1);
+
+          it('exports the same rows as the data view with the same index pattern', async () => {
+            const params = {
+              columns: ['category', 'currency', 'order_id'],
+              sort: [
+                ['order_date', 'asc'],
+                ['order_id', 'asc'],
+              ],
+              query: { language: 'kuery', query: 'currency:EUR' },
+              timeRange,
+            };
+            const withDataViewId = await generateCsv({ ...params, dataViewId: ECOM_DATA_VIEW_ID });
+            const withDataViewSpec = await generateCsv({ ...params, dataViewSpec: ecommerceSpec });
+
+            expect(getRows(withDataViewSpec.csvFile).length).to.be.greaterThan(1);
+            expect(withDataViewSpec.csvFile).to.eql(withDataViewId.csvFile);
+            // there is no saved search, so the title is the name of the data view
+            expect(withDataViewSpec.job.payload.title).to.eql('ecommerce');
+          });
+
+          describe('as a user that only has access to the ecommerce index', () => {
+            const logstashSpec = {
+              id: 'ad-hoc-logstash',
+              title: 'logstash-*',
+              timeFieldName: '@timestamp',
+            };
+            const logstashTimeRange = {
+              from: '2015-09-19T00:00:00.000Z',
+              to: '2015-09-24T00:00:00.000Z',
+            };
+
+            const generateCsvAsReportingUser = async (
+              params: JobParamsCsvFromSavedObject['locatorParams'][number]['params']
+            ) => {
+              const { REPORTING_USER_USERNAME: username, REPORTING_USER_PASSWORD: password } =
+                reportingAPI;
+              const jobParams = rison.encode({
+                browserTimezone: 'UTC',
+                objectType: 'search',
+                version: '8.7.0',
+                title: 'ad hoc data view',
+                locatorParams: [{ id: DISCOVER_APP_LOCATOR, version: 'reporting', params }],
+              });
+              const { text, status } = await supertestWithoutAuth
+                .post('/api/reporting/generate/csv_v2')
+                .auth(username, password)
+                .set('kbn-xsrf', 'xxx')
+                .send({ jobParams });
+              expect(status).to.eql(200);
+
+              const { path }: { path: string } = JSON.parse(text);
+              await reportingAPI.waitForJobToFinish(path, true, username, password);
+
+              const download = await supertestWithoutAuth.get(path).auth(username, password);
+              const info = await supertestWithoutAuth
+                .get(path.replace('/api/reporting/jobs/download', '/internal/reporting/jobs/info'))
+                .auth(username, password);
+              return {
+                status: info.body.status,
+                csvFile: download.status === 200 ? download.text : '',
+              };
+            };
+
+            it('exports an index pattern that the user can read', async () => {
+              const { status, csvFile } = await generateCsvAsReportingUser({
+                dataViewSpec: ecommerceSpec,
+                columns: ['category', 'order_id'],
+                timeRange,
+              });
+
+              expect(status).to.eql('completed');
+              expect(getRows(csvFile).length).to.be.greaterThan(1);
+            });
+
+            it('does not export an index pattern that the user can not read', async () => {
+              const params = {
+                dataViewSpec: logstashSpec,
+                columns: ['message'],
+                timeRange: logstashTimeRange,
+              };
+
+              // the index pattern has rows, but they can only be read with more privileges
+              const { csvFile: allRows } = await generateCsv(params);
+              expect(getRows(allRows).length).to.be.greaterThan(1);
+
+              const { csvFile } = await generateCsvAsReportingUser(params);
+              expect(getRows(csvFile)).to.eql([]);
+            });
           });
         });
 

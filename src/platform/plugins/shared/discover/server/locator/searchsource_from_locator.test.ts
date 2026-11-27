@@ -14,7 +14,7 @@ import type { ISearchStartSearchSource, SearchSource, TimeRange } from '@kbn/dat
 import type { Filter } from '@kbn/es-query';
 import { createSearchSourceMock } from '@kbn/data-plugin/common/search/search_source/mocks';
 import { dataPluginMock } from '@kbn/data-plugin/server/mocks';
-import type { DataView, DataViewsService } from '@kbn/data-views-plugin/common';
+import type { DataView, DataViewSpec, DataViewsService } from '@kbn/data-views-plugin/common';
 import { createStubDataView } from '@kbn/data-views-plugin/common/stubs';
 import type { SavedSearchAttributes } from '@kbn/saved-search-plugin/common';
 import type { DiscoverSessionTabAttributes } from '@kbn/saved-search-plugin/server';
@@ -64,7 +64,7 @@ let searchSourceStart: ISearchStartSearchSource;
 let mockServices: Services;
 let mockSavedSearch: SavedObject<SavedSearchAttributes>;
 let mockDataView: DataView;
-let dataViewsService: jest.Mocked<Pick<DataViewsService, 'get'>>;
+let dataViewsService: jest.Mocked<Pick<DataViewsService, 'get' | 'create'>>;
 
 // mock search source belonging to the saved search
 let mockSearchSource: SearchSource;
@@ -79,7 +79,7 @@ beforeAll(async () => {
   uiSettingsClient = coreMock.createStart().uiSettings.asScopedToClient(soClient);
   searchSourceStart = await dataStartMock.search.searchSource.asScoped(request);
 
-  dataViewsService = { get: jest.fn() };
+  dataViewsService = { get: jest.fn(), create: jest.fn() };
 
   mockServices = {
     searchSourceStart,
@@ -110,15 +110,23 @@ beforeEach(() => {
   mockSearchSource = createSearchSourceMock();
   mockSearchSource.setField('index', mockDataView);
   dataViewsService.get.mockReset();
+  dataViewsService.create.mockReset();
 
-  // like the real one, the index is loaded from its id (the data views that are not mocked are ignored)
-  searchSourceStart.create = jest.fn().mockImplementation(async (fields?: { index?: string }) => {
-    const dataView = fields?.index ? await dataViewsService.get(fields.index) : undefined;
-    if (dataView) {
-      mockSearchSource.setField('index', dataView);
-    }
-    return mockSearchSource;
-  });
+  // like the real one, the index is loaded from its id, or created from its spec (the data views that are not
+  // mocked are ignored)
+  searchSourceStart.create = jest
+    .fn()
+    .mockImplementation(async (fields?: { index?: string | DataViewSpec }) => {
+      const index = fields?.index;
+      const dataView =
+        typeof index === 'string'
+          ? await dataViewsService.get(index)
+          : index && (await dataViewsService.create(index));
+      if (dataView) {
+        mockSearchSource.setField('index', dataView);
+      }
+      return mockSearchSource;
+    });
 
   const uiSettingsGet = uiSettingsClient.get;
   uiSettingsClient.get = jest.fn().mockImplementation((key: string) => {
@@ -815,5 +823,146 @@ describe('fields', () => {
     expect(searchSource.getSerializedFields().fields).toEqual([
       { field: '*', include_unmapped: true },
     ]);
+  });
+});
+
+describe('ad hoc data view (dataViewSpec)', () => {
+  const dataViewSpec = {
+    id: 'ad-hoc-data-view',
+    title: 'logs-*',
+    name: 'logs',
+    timeFieldName: '@timestamp',
+  };
+  let adHocDataView: DataView;
+
+  beforeEach(() => {
+    adHocDataView = createStubDataView({ spec: dataViewSpec });
+    dataViewsService.create.mockResolvedValue(adHocDataView);
+  });
+
+  test('creates the data view from the spec, without the fields of the spec, and uses it', async () => {
+    const provider = searchSourceFromLocatorFactory(mockServices);
+    const searchSource = await provider({
+      dataViewSpec: {
+        ...dataViewSpec,
+        fields: {
+          message: { name: 'message', type: 'string', searchable: true, aggregatable: false },
+        },
+      },
+      columns: ['message'],
+      timeRange: { from: 'now-15m', to: 'now' },
+    });
+
+    // the fields are always loaded from Elasticsearch
+    expect(dataViewsService.create).toHaveBeenCalledTimes(1);
+    expect(dataViewsService.create).toHaveBeenCalledWith(dataViewSpec);
+    expect(dataViewsService.get).not.toHaveBeenCalled();
+
+    expect(searchSource.getField('index')).toBe(adHocDataView);
+    expect(searchSource.getSerializedFields().fields).toEqual([
+      { field: '@timestamp', include_unmapped: true },
+      { field: 'message', include_unmapped: true },
+    ]);
+    expect(searchSource.getSerializedFields().filter).toEqual([
+      expect.objectContaining({ meta: expect.objectContaining({ field: '@timestamp' }) }),
+    ]);
+  });
+
+  test('replaces the data view of the saved search, which is not loaded', async () => {
+    const provider = searchSourceFromLocatorFactory(mockServices);
+    const searchSource = await provider({ savedSearchId: mockSavedSearchId, dataViewSpec });
+
+    expect(searchSource.getField('index')).toBe(adHocDataView);
+    expect(dataViewsService.get).not.toHaveBeenCalled();
+  });
+
+  test('its filters replace the ones of the saved search', async () => {
+    mockSearchSource.setField('filter', {
+      meta: { index: 'logstash-*' },
+      query: { term: { host: 'elastic.co' } },
+    });
+
+    const provider = searchSourceFromLocatorFactory(mockServices);
+    const searchSource = await provider({
+      savedSearchId: mockSavedSearchId,
+      dataViewSpec,
+      filters: [],
+    });
+
+    expect(searchSource.getSerializedFields().filter).toBeUndefined();
+  });
+
+  test('accepts the spec that Discover sends for an ad hoc data view', async () => {
+    const provider = searchSourceFromLocatorFactory(mockServices);
+    await expect(
+      provider({
+        dataViewSpec: {
+          ...dataViewSpec,
+          allowHidden: false,
+          allowNoIndex: false,
+          fieldFormats: {},
+          runtimeFieldMap: {
+            day: { type: 'keyword', script: { source: "emit('day')" } },
+          },
+          sourceFilters: [{ value: 'secret*' }],
+        },
+      })
+    ).resolves.toBeDefined();
+  });
+
+  test('accepts a spec with many runtime fields', async () => {
+    const provider = searchSourceFromLocatorFactory(mockServices);
+    await expect(
+      provider({
+        dataViewSpec: {
+          ...dataViewSpec,
+          runtimeFieldMap: Object.fromEntries(
+            Array.from({ length: 250 }, (_, i) => [
+              `field${i}`,
+              { type: 'keyword', script: { source: `emit('${i}')` } },
+            ])
+          ),
+        },
+      })
+    ).resolves.toBeDefined();
+  });
+
+  test.each([
+    ['is null', null, 'must be an object'],
+    ['is not an object', 'logs-*', 'must be an object'],
+    ['is an array', [], 'must be an object'],
+    ['does not have a title', {}, 'must have a "title"'],
+    ['has an empty title', { title: '' }, 'must have a "title"'],
+    ['has a title that is not a string', { title: 123 }, 'must have a "title"'],
+    ['has a title that is too long', { title: 'a'.repeat(4097) }, 'must have a "title"'],
+    [
+      'has a time field that is not a string',
+      { title: 'logs-*', timeFieldName: ['@timestamp'] },
+      '"timeFieldName" must be a string',
+    ],
+    ['is an ES|QL data view', { title: 'logs-*', type: 'esql' }, '"type" is not supported'],
+    [
+      'is too big',
+      { title: 'logs-*', fieldFormats: { bytes: { params: 'a'.repeat(100_001) } } },
+      'is too big',
+    ],
+  ])('throws if the spec %s', async (_description, spec, message) => {
+    const provider = searchSourceFromLocatorFactory(mockServices);
+    await expect(provider({ dataViewSpec: spec as unknown as DataViewSpec })).rejects.toThrow(
+      message
+    );
+
+    // nothing is created with an invalid spec
+    expect(searchSourceStart.create).not.toHaveBeenCalled();
+    expect(dataViewsService.create).not.toHaveBeenCalled();
+  });
+
+  test('throws if it is used together with a data view id', async () => {
+    const provider = searchSourceFromLocatorFactory(mockServices);
+    await expect(provider({ dataViewId: 'data-view-id', dataViewSpec })).rejects.toThrow(
+      '"dataViewId" and "dataViewSpec" can not be used together'
+    );
+    expect(dataViewsService.create).not.toHaveBeenCalled();
+    expect(dataViewsService.get).not.toHaveBeenCalled();
   });
 });
